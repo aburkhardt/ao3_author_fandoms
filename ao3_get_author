@@ -1,0 +1,181 @@
+#progress notes
+#made a lot of progress with this but broke it at the last minute, so it's currently not working
+#it was pretty damn close though
+#should the output format be a csv, json, or linked up with a google sheet?
+#or should it be its own lil database?
+#also, finish the pickling stuff: it doesn't need to be reloaded if it's been reloaded that day
+#I haven't used AO3Scraper at all (just AO3_api) - should that be deleted?
+
+#goal:
+#go to a user's bookmarks
+#pull a list of all bookmarked authors
+#check the author's fics
+#return a list of all their fandoms
+#excluding any already bookmarked (for that author specifically)
+#export as csv?
+
+#remaining qs:
+#is json easier than nesting dicts? probably?
+#try pickling
+#how to handle fics with multiple authors 
+#or fics with pseuds
+#run in background?
+#handle rate limiting errors
+
+import AO3
+from time import time
+from datetime import datetime
+from configparser import ConfigParser
+import pickle
+import os
+
+#
+folder_name = "Data_Sources"
+file_path = os.path.join(folder_name, "author_last_reload.pickle")
+
+
+def start():
+    #AO3.utils.limit_requests(True) #this makes even simple requests take a super long time, but it's probably necessary for larger queries
+    #AO3.utils.load_fandoms() #is this necessary? or do they just come as metadata attributes from work objects?
+    type = input("login or guest? ")
+    if type == "login":
+        config = ConfigParser()
+        config.read('config.ini')
+        username = config.get('AO3','username')
+        password = config.get('AO3', 'password')
+        session = AO3.Session(username, password)
+        print(f"Welcome, {username}")
+    else:
+        session = "guest"
+        print("Welcome, Guest")
+    return session
+
+def load_author_last_reload(file_path):
+    try:
+        with open(file_path, 'rb') as file:
+            return pickle.load(file)
+    except FileNotFoundError:
+        return {}
+
+def save_author_last_reload(author_last_reload, file_path):
+    with open(file_path, 'wb') as file:
+        pickle.dump(author_last_reload, file)
+
+def get_subscribed_authors(session):
+    if session == "guest":
+        pass
+    else:
+        subscribed_authors = session.get_user_subscriptions()
+        return subscribed_authors
+    
+def get_bookmarks(session):
+    if session == "guest":
+        user = input("What user would you like to look up?: ")
+        bookmarks = user.get_bookmarks()
+        #AttributeError: 'str' has no attribute 'get_bookmarks'
+        return bookmarks
+    else:
+        user = session.user
+        bookmarks = session.get_bookmarks()
+        return bookmarks
+
+def get_bookmarked_authors(bookmarks):
+    bookmarked_authors = []
+    for work in bookmarks:
+        for author in work.authors:
+            if work.authors not in bookmarked_authors:
+                bookmarked_authors.append(author)
+    return bookmarked_authors
+
+def merge_authors(subscribed_authors, bookmarked_authors):
+    merged_authors = []
+    merged_authors = subscribed_authors + bookmarked_authors
+    return merged_authors
+
+def filter_unique(merged_authors):
+    authors = []
+    unique_values = set()
+    for author in merged_authors:
+        key = (author.username)
+        if key not in unique_values:
+            authors.append(author)
+            unique_values.add(key)
+    return authors
+
+def get_author_fandoms(authors, file_path):
+    # Load the author_last_reload dictionary
+    author_last_reload = load_author_last_reload(file_path)
+    
+    result_dict = {}
+    today = datetime.date.today()
+    
+    for author in authors:
+        try:
+            # Check if author has been reloaded today
+            last_reload = author_last_reload.get(author.username)
+            
+            if last_reload != today:
+                author.reload()
+                author_last_reload[author.username] = today
+                new_info_msg = ''
+            else:
+                new_info_msg = 'no new info'
+            
+            authorworks = author.get_works()
+            
+            fandoms_set = set()
+            for work in authorworks:
+                fandoms_set.update(work.fandoms)
+            
+            # Find the work with the most recent date_updated
+            most_recent_work = max(authorworks, key=lambda x: x.date_updated)
+            last_updated = most_recent_work.date_updated if authorworks else None
+            
+            result_dict[author.username] = {'author': author.username, 'fandoms': list(fandoms_set), 'last_updated': last_updated, 'message': new_info_msg}
+        except Exception as e:
+            print(f"Error processing {author.username}: {e}")
+            continue
+        
+        # Introduce a 5-second delay before processing the next author
+        time.sleep(5)
+    
+    # Save the author_last_reload dictionary
+    save_author_last_reload(author_last_reload, file_path)
+    
+    return result_dict
+
+def get_most_recent_publish_date(works):
+    # Find the most recent publish date among the works
+    most_recent_publish_date = None
+    for work in works:
+        if most_recent_publish_date is None or work.date_updated > most_recent_publish_date:
+            most_recent_publish_date = work.date_updated
+    return most_recent_publish_date
+
+#start: bookmarks (user object)
+#get list of bookmarks (list of work objects)
+# get list of bookmarked authors (list of user objects)
+    # if logged in
+        #start: subscribed authors
+#get authors of interest (list of user objects - combined bookmarked/subscribed)
+    #output type: user object (keep for display: username as dict key)
+#for each author: get works
+    #output type: work object 
+#for each work: get fandoms (keep for display: [fandoms])
+
+
+#run in order
+def run():
+    session = start()
+
+    subscribed_authors = get_subscribed_authors(session)
+
+    bookmarks = get_bookmarks(session)
+
+    bookmarked_authors = get_bookmarked_authors(bookmarks)
+
+    authors_messy = merge_authors(subscribed_authors, bookmarked_authors)
+
+    authors = filter_unique(authors_messy)
+
+    fandoms = get_author_fandoms(authors, file_path)
