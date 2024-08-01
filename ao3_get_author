@@ -3,8 +3,9 @@
 #it was pretty damn close though
 #should the output format be a csv, json, or linked up with a google sheet?
 #or should it be its own lil database?
-#also, finish the pickling stuff: it doesn't need to be reloaded if it's been reloaded that day
+#also, finish the pickling stuff: it doesn't need to be reloaded if it's been reloaded that day (or maybe in the last week? wish there was a way to partial reload)
 #I haven't used AO3Scraper at all (just AO3_api) - should that be deleted?
+#maybe add a "my fandoms" file. maybe that is most useful if I use this as a google sheet
 
 #goal:
 #go to a user's bookmarks
@@ -22,27 +23,38 @@
 #run in background?
 #handle rate limiting errors
 
+
+#start: bookmarks (user object)
+#get list of bookmarks (list of work objects)
+# get list of bookmarked authors (list of user objects)
+    # if logged in
+        #start: subscribed authors
+#get authors of interest (list of user objects - combined bookmarked/subscribed)
+    #output type: user object (keep for display: username as dict key)
+#for each author: get works
+    #output type: work object 
+#for each work: get fandoms (keep for display: [fandoms])
+
 import AO3
-from time import time
-from datetime import datetime
 from configparser import ConfigParser
-import pickle
-import os
-
-#
-folder_name = "Data_Sources"
-file_path = os.path.join(folder_name, "author_last_reload.pickle")
-
+import json
+import csv
+import time
+import random
+import AO3
 
 def start():
     #AO3.utils.limit_requests(True) #this makes even simple requests take a super long time, but it's probably necessary for larger queries
     #AO3.utils.load_fandoms() #is this necessary? or do they just come as metadata attributes from work objects?
     type = input("login or guest? ")
     if type == "login":
+        username = input("username: ")
         config = ConfigParser()
         config.read('config.ini')
-        username = config.get('AO3','username')
-        password = config.get('AO3', 'password')
+        if username == config.get('AO3','username'):
+            password = config.get('AO3', 'password')
+        else:
+            password = input("password: ")
         session = AO3.Session(username, password)
         print(f"Welcome, {username}")
     else:
@@ -50,24 +62,13 @@ def start():
         print("Welcome, Guest")
     return session
 
-def load_author_last_reload(file_path):
-    try:
-        with open(file_path, 'rb') as file:
-            return pickle.load(file)
-    except FileNotFoundError:
-        return {}
-
-def save_author_last_reload(author_last_reload, file_path):
-    with open(file_path, 'wb') as file:
-        pickle.dump(author_last_reload, file)
-
 def get_subscribed_authors(session):
     if session == "guest":
         pass
     else:
         subscribed_authors = session.get_user_subscriptions()
         return subscribed_authors
-    
+
 def get_bookmarks(session):
     if session == "guest":
         user = input("What user would you like to look up?: ")
@@ -78,6 +79,67 @@ def get_bookmarks(session):
         user = session.user
         bookmarks = session.get_bookmarks()
         return bookmarks
+    
+def get_bookmarks_with_strategies(session, cache=None):
+    if cache is None:
+        cache = {}  # Initialize an empty cache
+        
+    # Check if bookmarks are already cached
+    if 'bookmarks' in cache:
+        return cache['bookmarks']
+    
+    # Initialize empty list to store all bookmarks
+    all_bookmarks = []
+    
+    # Define batch size for batching requests
+    batch_size = 30  # Adjust batch size based on API rate limits
+    
+    # Initialize variables for exponential backoff
+    retries = 0
+    max_retries = 5  # Adjust maximum number of retries
+    base_delay = 1  # Initial delay in seconds
+    
+    while retries <= max_retries:
+        try:
+            # Make API call to get bookmarks
+            bookmarks = session.get_bookmarks()
+            
+            # Group bookmarks into batches
+            for i in range(0, len(bookmarks), batch_size):
+                bookmarks_batch = bookmarks[i:i+batch_size]
+                
+                # Process each batch of bookmarks
+                for bookmark in bookmarks_batch:
+                    # Perform any necessary processing on the bookmark object
+                    bookmark.reload()
+                    pass
+                
+                all_bookmarks.extend(bookmarks_batch)
+                
+            # Cache the bookmarks
+            cache['bookmarks'] = all_bookmarks
+            
+            return all_bookmarks
+        
+        except Exception as e:
+            print(f"Error fetching bookmarks: {e}")
+            retries += 1
+            delay = base_delay * 2 ** retries  # Exponential backoff
+            time.sleep(delay + random.uniform(0, 1))  # Add jitter to avoid synchronized retries
+
+    # If all retries fail, raise an exception
+    raise Exception("Failed to fetch bookmarks after multiple retries")
+    
+def get_bookmarked_fandoms(bookmarks):
+    # Collect unique fandoms into a set
+    unique_fandoms_set = set()
+    for work in bookmarks:
+        unique_fandoms_set.update(work.fandoms)
+
+    # Convert the set back to a list
+    bookmarked_fandoms = list(unique_fandoms_set)
+
+    return bookmarked_fandoms
 
 def get_bookmarked_authors(bookmarks):
     bookmarked_authors = []
@@ -104,22 +166,31 @@ def filter_unique(merged_authors):
 
 def get_author_fandoms(authors, file_path):
     # Load the author_last_reload dictionary
+    # this will need to be rewritten once I decide which data storage filetype to go with
+    from pickling import load_author_last_reload
     author_last_reload = load_author_last_reload(file_path)
     
     result_dict = {}
-    today = datetime.date.today()
+    from datetime import date
+    today = date.today()  # Corrected
+    from datetime import timedelta
+    last_week = today - timedelta(days=7)  # Date from one week ago
     
     for author in authors:
         try:
-            # Check if author has been reloaded today
+            # Check if author has been reloaded within the last week
             last_reload = author_last_reload.get(author.username)
-            
-            if last_reload != today:
+            #need to add: if we're not reloading, pull the pickled user object & use that instead
+            if last_reload is None or last_reload < last_week:
                 author.reload()
                 author_last_reload[author.username] = today
-                new_info_msg = ''
+                reload_date_str = today.strftime('%m/%d/%Y')
+                
+                # Introduce a 5-second delay after reloading the author
+                from time import sleep as time_sleep
+                time_sleep(5)
             else:
-                new_info_msg = 'no new info'
+                reload_date_str = last_reload.strftime('%m/%d/%Y') if last_reload else ''
             
             authorworks = author.get_works()
             
@@ -129,20 +200,30 @@ def get_author_fandoms(authors, file_path):
             
             # Find the work with the most recent date_updated
             most_recent_work = max(authorworks, key=lambda x: x.date_updated)
-            last_updated = most_recent_work.date_updated if authorworks else None
+            last_updated = most_recent_work.date_updated.strftime('%m/%d/%Y') if authorworks else None
             
-            result_dict[author.username] = {'author': author.username, 'fandoms': list(fandoms_set), 'last_updated': last_updated, 'message': new_info_msg}
+            result_dict[author.username] = {'author': author.username, 'fandoms': list(fandoms_set), 'last_updated': last_updated, 'last_reload_date': reload_date_str}
         except Exception as e:
             print(f"Error processing {author.username}: {e}")
             continue
-        
-        # Introduce a 5-second delay before processing the next author
-        time.sleep(5)
     
     # Save the author_last_reload dictionary
+    #this will need to be rewritten
+    from pickling import save_author_last_reload
     save_author_last_reload(author_last_reload, file_path)
     
     return result_dict
+
+def find_common_fandoms(bookmarked_fandoms, result_dict_fandoms):
+    # Filter common fandoms
+    common_fandoms = [fandom for fandom in result_dict_fandoms if fandom in bookmarked_fandoms]
+    return common_fandoms
+
+def add_common_fandoms_to_result_dict(result_dict, bookmarked_fandoms):
+    for author_info in result_dict.values():
+        result_dict_fandoms = author_info['fandoms']
+        common_fandoms = find_common_fandoms(bookmarked_fandoms, result_dict_fandoms)
+        author_info['fandoms_of_interest'] = common_fandoms
 
 def get_most_recent_publish_date(works):
     # Find the most recent publish date among the works
@@ -152,16 +233,19 @@ def get_most_recent_publish_date(works):
             most_recent_publish_date = work.date_updated
     return most_recent_publish_date
 
-#start: bookmarks (user object)
-#get list of bookmarks (list of work objects)
-# get list of bookmarked authors (list of user objects)
-    # if logged in
-        #start: subscribed authors
-#get authors of interest (list of user objects - combined bookmarked/subscribed)
-    #output type: user object (keep for display: username as dict key)
-#for each author: get works
-    #output type: work object 
-#for each work: get fandoms (keep for display: [fandoms])
+def export(fandoms):
+    json_object = json.dumps(fandoms, indent = 4)
+    return json_object
+    #json useful for prettyprinting
+    #but a csv or google sheet is probably ultimately the most useful
+    #if csv:
+        #create a new one every time? with timestamped filenames & including the session/bookmark data username?
+        #or new rows and include the time stamp & session date as columns?
+    #if google sheet:
+        #already feels weird enough working on this on work time
+        #but it is indeed good practice
+        #still, wouldn't want that saved in my work account and I feel weird about using my personal instead
+        #hm
 
 
 #run in order
@@ -178,4 +262,8 @@ def run():
 
     authors = filter_unique(authors_messy)
 
-    fandoms = get_author_fandoms(authors, file_path)
+    from pickling import pickle_path
+    #the pickling will need to be rewritten, that's the older version
+    fandoms = get_author_fandoms(authors, pickle_path)
+    
+    export(fandoms)
